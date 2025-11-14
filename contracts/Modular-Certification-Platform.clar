@@ -11,6 +11,8 @@
 (define-constant err-not-issuer (err u106))
 (define-constant err-degree-locked (err u107))
 (define-constant err-invalid-params (err u108))
+(define-constant err-transfer-disabled (err u109))
+(define-constant err-credential-revoked (err u110))
 
 (define-data-var credential-nonce uint u0)
 (define-data-var degree-nonce uint u0)
@@ -36,7 +38,8 @@
         issued-at: uint,
         expires-at: (optional uint),
         revoked: bool,
-        skill-tags: (list 10 (string-ascii 32))
+        skill-tags: (list 10 (string-ascii 32)),
+        transferable: bool
     }
 )
 
@@ -130,7 +133,8 @@
             issued-at: stacks-block-height,
             expires-at: expires-at,
             revoked: false,
-            skill-tags: skill-tags
+            skill-tags: skill-tags,
+            transferable: true
         })
         (map-set holder-credentials {holder: holder, credential-id: credential-id} true)
         (map-set issuers tx-sender 
@@ -232,6 +236,45 @@
     )
 )
 
+(define-public (transfer-credential 
+    (credential-id uint)
+    (new-holder principal)
+)
+    (let (
+        (credential (unwrap! (map-get? credentials credential-id) err-not-found))
+        (current-holder (get holder credential))
+    )
+        (asserts! (is-eq tx-sender current-holder) err-unauthorized)
+        (asserts! (get transferable credential) err-transfer-disabled)
+        (asserts! (not (get revoked credential)) err-credential-revoked)
+        (asserts! 
+            (match (get expires-at credential)
+                expiry (>= expiry stacks-block-height)
+                true
+            )
+            err-credential-expired
+        )
+        (map-set credentials credential-id
+            (merge credential {holder: new-holder})
+        )
+        (map-delete holder-credentials {holder: current-holder, credential-id: credential-id})
+        (map-set holder-credentials {holder: new-holder, credential-id: credential-id} true)
+        (ok true)
+    )
+)
+
+(define-public (toggle-credential-transferability (credential-id uint))
+    (let (
+        (credential (unwrap! (map-get? credentials credential-id) err-not-found))
+    )
+        (asserts! (is-eq tx-sender (get issuer credential)) err-unauthorized)
+        (map-set credentials credential-id
+            (merge credential {transferable: (not (get transferable credential))})
+        )
+        (ok (not (get transferable credential)))
+    )
+)
+
 (define-read-only (get-credential (credential-id uint))
     (ok (map-get? credentials credential-id))
 )
@@ -281,6 +324,20 @@
     (degree-id uint)
 )
     (ok (default-to false (map-get? holder-degrees {holder: holder, degree-id: degree-id})))
+)
+
+(define-read-only (is-credential-transferable (credential-id uint))
+    (match (map-get? credentials credential-id)
+        credential (ok {
+            transferable: (get transferable credential),
+            revoked: (get revoked credential),
+            expired: (match (get expires-at credential)
+                expiry (< expiry stacks-block-height)
+                false
+            )
+        })
+        err-not-found
+    )
 )
 
 (define-private (check-credentials-ownership 
